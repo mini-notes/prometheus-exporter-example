@@ -166,6 +166,13 @@ func main() {
 			case tm := <-ticker.C:
 				fmt.Println("The Current time is: ", tm)
 				for _, host := range hostList {
+					// To fix, first unregister the old ServerDetailMetric.
+					prometheus.Unregister(ServerDetailMetric)
+
+					// Try registering ServerDetailMetric again to reset metric lables.
+					if err := prometheus.Register(ServerDetailMetric); err != nil {
+						fmt.Println("ServerDetailMetric not registered:", err)
+					}
 					serverMetric := pullMetrics(ctx, query, host)
 					ServerDetailMetric.With(prometheus.Labels{
 						Host:   host,
