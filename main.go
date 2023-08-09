@@ -17,18 +17,20 @@ import (
 
 type ServerDetail struct {
 	// Host    string
-	Status  string
+	Status  int
 	Restime int
 }
+
+type DB_Status int
+
+const (
+	Up DB_Status = iota
+	Down
+)
 
 var (
 	Host   = "Host"
 	Status = "Status"
-)
-
-var (
-	Up   = "Up"
-	Down = "Down"
 )
 
 // type metrics struct {
@@ -59,9 +61,9 @@ func handleError(msg string, err error) {
 	}
 }
 
-func doDB_query(dbParams map[string]string, query string, host string) string {
+func doDB_query(dbParams map[string]string, query string, host string) int {
 	port, err := strconv.Atoi(dbParams["port"])
-	var db_status string = Up
+	var db_status int = int(Up)
 
 	handleError("Error during conversion", err)
 	// set connection time for 10 second
@@ -85,10 +87,10 @@ func doDB_query(dbParams map[string]string, query string, host string) string {
 	fmt.Printf("PING to server: %s - port: %d ", host, port)
 	err = db.Ping()
 	if err != nil {
-		db_status = Down
+		db_status = int(Down)
 		fmt.Printf("error pinging db: %s", err)
 	} else {
-		db_status = Up
+		db_status = int(Up)
 		db_Select_query(db, query)
 	}
 	return db_status
@@ -124,6 +126,11 @@ func pullMetrics(ctx context.Context, query string, host string) ServerDetail {
 	t := time.Now()
 	s := doDB_query(localDB, query, host)
 	take_time = int(time.Now().Sub(t).Milliseconds())
+
+	// if server down -> take_time=0
+	if s == int(Down) {
+		take_time = 0
+	}
 	fmt.Printf("Time Elapsed: %d ms\n", take_time)
 	server.Restime = take_time
 	server.Status = s
@@ -135,26 +142,35 @@ func main() {
 	// hosts := "127.0.0.1;localhost"
 	hosts := getenv_with_fallback("DB_MONITOR_SERVER", "localhost")
 	hostList := strings.Split(hosts, ";")
-	ServerDetailMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+
+	serverTakeTtime := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "Db_take_time",
 		Help: "Time Elapsed query oracle db (ms)",
-	}, []string{Host, Status})
+	}, []string{Host})
 
-	reg.MustRegister(ServerDetailMetric)
+	serverStatus := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "db_status",
+		Help: "Check database status: 0 - up, 1: down",
+	}, []string{Host})
+
+	reg.MustRegister(serverTakeTtime, serverStatus)
 	var query string = getenv_with_fallback("DB_MONITOR_QUERY", "select employee_name,city from employees")
 	pull_interval_duration, err := strconv.Atoi(getenv_with_fallback("DB_MONITOR_PULL_INTERVAL", "5"))
 	handleError("Error during conversion", err)
 	var listen_server string = getenv_with_fallback("LISTEN_SERVER", ":8081")
 
+	//ctx
 	ctx := context.Background()
 
 	// init
 	for _, host := range hostList {
 		serverMetric := pullMetrics(ctx, query, host)
-		ServerDetailMetric.With(prometheus.Labels{
-			Host:   host,
-			Status: serverMetric.Status,
+		serverTakeTtime.With(prometheus.Labels{
+			Host: host,
 		}).Set(float64(serverMetric.Restime))
+		serverStatus.With(prometheus.Labels{
+			Host: host,
+		}).Set(float64(serverMetric.Status))
 	}
 	go func(ctx context.Context) {
 		ticker := time.NewTicker(time.Duration(pull_interval_duration) * time.Second)
@@ -166,18 +182,13 @@ func main() {
 			case tm := <-ticker.C:
 				fmt.Println("The Current time is: ", tm)
 				for _, host := range hostList {
-					// To fix, first unregister the old ServerDetailMetric.
-					prometheus.Unregister(ServerDetailMetric)
-
-					// Try registering ServerDetailMetric again to reset metric lables.
-					if err := prometheus.Register(ServerDetailMetric); err != nil {
-						fmt.Println("ServerDetailMetric not registered:", err)
-					}
 					serverMetric := pullMetrics(ctx, query, host)
-					ServerDetailMetric.With(prometheus.Labels{
-						Host:   host,
-						Status: serverMetric.Status,
+					serverTakeTtime.With(prometheus.Labels{
+						Host: host,
 					}).Set(float64(serverMetric.Restime))
+					serverStatus.With(prometheus.Labels{
+						Host: host,
+					}).Set(float64(serverMetric.Status))
 				}
 				fmt.Println("End Current time is: ", tm)
 			}
